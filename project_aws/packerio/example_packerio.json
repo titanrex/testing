@@ -1,0 +1,86 @@
+{
+    "variables": {
+      "aws_access_key": "",
+      "aws_secret_key": "",
+      "aws_region": "us-west-2",
+      "vpc_id": "your-vpc-id",
+      "subnet_id": "your-subnet-id",
+      "alb_listener_port": 80,
+      "alb_target_group_port": 8080,
+      "security_group_name": "my-security-group",
+      "ami_name": "my-ami",
+      "rds_instance_class": "db.t2.micro",
+      "rds_engine": "postgres",
+      "rds_username": "my-username",
+      "rds_password": "my-password",
+      "rds_database_name": "dbroboto",
+      "r53_hosted_zone_name": "roboto.com",
+      "r53_alias_name": "superroboto",
+      "efs_mount_path": "/mnt/efs",
+      "efs_filesystem_name": "robotosystem",
+      "efs_security_group_name": "roboto-security-group"
+    },
+    "builders": [
+      {
+        "type": "amazon-ebs",
+        "access_key": "{{user `aws_access_key`}}",
+        "secret_key": "{{user `aws_secret_key`}}",
+        "region": "{{user `aws_region`}}",
+        "source_ami_filter": {
+          "filters": {
+            "name": "ubuntu/images/*ubuntu-xenial-16.04-amd64-server-*",
+            "root-device-type": "ebs",
+            "virtualization-type": "hvm"
+          },
+          "most_recent": true,
+          "owners": ["099720109477"],
+          "type": "amazon"
+        },
+        "instance_type": "t2.micro",
+        "ssh_username": "ubuntu",
+        "ami_name": "{{user `ami_name`}}"
+      }
+    ],
+    "provisioners": [
+      {
+        "type": "shell",
+        "inline": [
+          "# Instalar dependencias y configurar aplicaciones",
+          "apt-get update",
+          "apt-get install -y nginx postgresql-client",
+          "systemctl start nginx",
+  
+          "# Configurar Security Group",
+          "aws ec2 create-security-group --group-name {{user `security_group_name`}} --description \"roboto security group\"",
+          "aws ec2 authorize-security-group-ingress --group-name {{user `security_group_name`}} --protocol tcp --port 80 --source 0.0.0.0/0",
+  
+          "# Load Balancer",
+          "aws elbv2 create-load-balancer --name my-alb --subnets {{user `subnet_id`}} --security-groups {{user `security_group_name`}}",
+          "aws elbv2 create-target-group --name my-target-group --protocol HTTP --port {{user `alb_target_group_port`}} --target-type instance",
+          "aws elbv2 create-listener --load-balancer-arn YOUR_LOAD_BALANCER_ARN --protocol HTTP --port {{user `alb_listener_port`}} --default-actions Type=forward,TargetGroupArn=YOUR_TARGET_GROUP_ARN",
+  
+          "#  RDS (PostgreSQL) instance",
+          "aws rds create-db-instance --db-instance-identifier my-rds-instance --db-instance-class {{user `rds_instance_class`}} --engine {{user `rds_engine`}} --engine-version 13.3 --allocated-storage 20 --master-username {{user `rds_username`}} --master-user-password {{user `rds_password`}} --db-name {{user `rds_database_name`}}",
+  
+          "#  R53 Hosted Zone",
+          "aws route53 create-hosted-zone --name {{user `r53_hosted_zone_name`}} --caller-reference my-hosted-zone",
+          "HOSTED_ZONE_ID=$(aws route53 list-hosted-zones --query 'HostedZones[?Name==`{{user `r53_hosted_zone_name`}}.`].Id' --output text)",
+  
+          "#  ALB DNS ",
+          "ALB_DNS_NAME=$(aws elbv2 describe-load-balancers --names my-alb --query 'LoadBalancers[0].DNSName' --output text)",
+  
+          "# R53 ",
+          "aws route53 change-resource-record-sets --hosted-zone-id $HOSTED_ZONE_ID --change-batch '{\"Changes\":[{\"Action\":\"UPSERT\",\"ResourceRecordSet\":{\"Name\":\"{{user `r53_alias_name`}}\",\"Type\":\"A\",\"AliasTarget\":{\"DNSName\":\"'$ALB_DNS_NAME'\",\"EvaluateTargetHealth\":false},\"SetIdentifier\":\"my-alias\",\"Weight\":100,\"TTL\":60}}]}'",
+  
+          "# EFS",
+          "efs_response=$(aws efs create-file-system --creation-token my-efs-filesystem)",
+          "EFS_FILESYSTEM_ID=$(echo $efs_response | jq -r '.FileSystemId')",
+          "efs_mount_target_response=$(aws efs create-mount-target --file-system-id $EFS_FILESYSTEM_ID --subnet-id {{user `subnet_id`}} --security-groups {{user `efs_security_group_name`}})",
+          "EFS_MOUNT_TARGET_ID=$(echo $efs_mount_target_response | jq -r '.MountTargetId')",
+          "mkdir -p {{user `efs_mount_path`}}",
+          "echo \"$EFS_FILESYSTEM_ID:/ {{user `efs_mount_path`}} efs defaults,_netdev 0 0\" >> /etc/fstab",
+          "mount -a"
+        ]
+      }
+    ]
+  }
