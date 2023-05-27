@@ -1,0 +1,191 @@
+---
+- name: Configuración completa de AWS con Ansible
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    aws_access_key: "TU_ACCESS_KEY"
+    aws_secret_key: "TU_SECRET_KEY"
+    region: "TU_REGION"
+    hosted_zone_id: "TU_HOSTED_ZONE_ID"
+    ami_id: "TU_AMI_ID"
+    db_user: "TU_DB_USER"
+    db_password: "TU_DB_PASSWORD"
+    db_name: "TU_DB_NAME"
+    alias_name: "TU_ALIAS_NAME"
+    alias_target: "TU_ALIAS_TARGET"
+    lb_name: "TU_LOAD_BALANCER_NAME"
+    lb_port: 80
+    lb_protocol: "HTTP"
+    lb_target_port: 8080
+    lb_target_protocol: "HTTP"
+    lb_subnets:
+      - "SUBNET_ID_1"
+      - "SUBNET_ID_2"
+    efs_name: "NOMBRE_DEL_EFS"
+    efs_subnet_ids:
+      - "SUBNET_ID_1"
+      - "SUBNET_ID_2"
+    efs_security_group: "ID_DEL_SECURITY_GROUP"
+
+  tasks:
+    - name: Crear registro en Route 53
+      route53:
+        state: present
+        command: create
+        zone: "{{ hosted_zone_id }}"
+        record: "nombredominio.com"
+        type: A
+        ttl: 300
+        value: "IP_DEL_SERVIDOR"
+
+    - name: Crear instancia EC2 con la AMI
+      ec2:
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        region: "{{ region }}"
+        key_name: "NOMBRE_DE_TU_CLAVE"
+        instance_type: "t2.micro"
+        image: "{{ ami_id }}"
+        wait: yes
+        count: 1
+        vpc_subnet_id: "ID_DEL_SUBNET"
+        assign_public_ip: yes
+      register: ec2_instance
+
+    - name: Añadir la IP de la instancia EC2 al registro en Route 53
+      route53:
+        state: present
+        command: create
+        zone: "{{ hosted_zone_id }}"
+        record: "nombredominio.com"
+        type: A
+        ttl: 300
+        value: "{{ ec2_instance.instances[0].public_ip }}"
+
+    - name: Instalar PostgreSQL en la instancia EC2
+      become: true
+      hosts: "{{ ec2_instance.instances[0].public_ip }}"
+      tasks:
+        - name: Actualizar los paquetes del sistema
+          apt:
+            update_cache: yes
+
+        - name: Instalar PostgreSQL
+          apt:
+            name: postgresql
+            state: present
+
+        - name: Crear usuario y base de datos en PostgreSQL
+          become_user: postgres
+          become: true
+          postgresql_user:
+            db: "{{ db_name }}"
+            name: "{{ db_user }}"
+            password: "{{ db_password }}"
+            login_user: postgres
+            login_password: ""
+
+        - name: Permitir acceso remoto a PostgreSQL
+          lineinfile:
+            dest: /etc/postgresql/12/main/pg_hba.conf
+            regexp: '^host\s+all\s+all\s+0.0.0.0\/0\s+md5$'
+            line: 'host    all             all             0.0.0.0/0               md5'
+            state: present
+            backup: yes
+          notify:
+            - restart postgresql
+
+        - name: Reiniciar el servicio de PostgreSQL
+          become_user: postgres
+          become: true
+          command: systemctl restart postgresql
+          async: 0
+          poll: 0
+          ignore_errors: true
+
+    - name: Crear alias en Route 53
+      route53:
+        state: present
+        command: create
+        zone: "{{ hosted_zone_id }}"
+        record: "{{ alias_name }}"
+        type: CNAME
+        ttl: 300
+        value: "{{ alias_target }}"
+
+    - name: Crear Load Balancer en AWS
+      ec2_elbv2_lb:
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        region: "{{ region }}"
+        name: "{{ lb_name }}"
+        subnets: "{{ lb_subnets }}"
+        state: present
+      register: lb_result
+
+    - name: Registrar instancia EC2 en el Load Balancer
+      ec2_elbv2_target:
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        region: "{{ region }}"
+        target_type: instance
+        target_group_arn: "{{ lb_result.target_group_arn }}"
+        target_ids:
+          - "{{ ec2_instance.instances[0].id }}"
+        state: present
+
+    - name: Crear regla de escucha en el Load Balancer
+      ec2_elbv2_listener:
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        region: "{{ region }}"
+        load_balancer_arn: "{{ lb_result.load_balancer_arn }}"
+        port: "{{ lb_port }}"
+        protocol: "{{ lb_protocol }}"
+        default_action:
+          type: forward
+          target_group_arn: "{{ lb_result.target_group_arn }}"
+          redirect_config: {}
+        state: present
+
+    - name: Crear Hosted Zone en Route 53
+      route53_zone:
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        region: "{{ region }}"
+        name: "midominio.com"
+        comment: "Zona hospedada para midominio.com"
+        private: no
+        resource_record_set_count: 2
+        wait: yes
+      register: hosted_zone_result
+
+    - name: Mostrar detalles de la Hosted Zone creada
+      debug:
+        var: hosted_zone_result
+
+    - name: Crear sistema de archivos elástico (EFS)
+      efs:
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        region: "{{ region }}"
+        name: "{{ efs_name }}"
+        subnet_ids: "{{ efs_subnet_ids }}"
+        security_group: "{{ efs_security_group }}"
+        performance_mode: "generalPurpose"
+        throughput_mode: "bursting"
+        state: present
+      register: efs_result
+
+    - name: Mostrar detalles del EFS creado
+      debug:
+        var: efs_result
+
+  handlers:
+    - name: restart postgresql
+      become_user: postgres
+      become: true
+      service:
+        name: postgresql
+        state: restarted
