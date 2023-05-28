@@ -1,0 +1,31 @@
+{
+    "builders": [
+      {
+        "type": "googlecompute",
+        "project_id": "your-project-id",
+        "source_image_family": "ubuntu-1804-lts",
+        "image_name": "my-custom-image",
+        "image_family": "my-image-family",
+        "zone": "us-east41-a",
+        "ssh_username": "my-ssh-username",
+        "image_description": "My custom image with Cloud Load Balancer, Cloud DNS, Bastion, GKE Cluster, Container Registry, and Cloud SQL (PostgreSQL)",
+        "image_labels": {
+          "service": "my-app"
+        },
+        "service_account_email": "your-service-account-email@your-project-id.iam.gserviceaccount.com", 
+        "json_key_file": "/path/to/your/service_account_key.json"
+      }
+    ],
+    "provisioners": [
+      {
+        "type": "shell",
+        "inline": [
+          "apt-get update",
+          "apt-get install -y <package-names>",
+          "gcloud components install <component-names>",
+          "gcloud compute instances create my-instance --image-family=my-image-family --image-project=your-project-id --zone=us-east41-a"
+        ]
+      }
+    ]
+  }
+  
